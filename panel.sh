@@ -31,16 +31,16 @@ install_dependencies() {
 
     if command -v apt-get &>/dev/null; then
         apt-get update -qq
-        apt-get install -y -qq docker.io docker-compose-plugin openssl curl git >/dev/null
+        apt-get install -y -qq docker.io openssl curl git >/dev/null
     elif command -v pacman &>/dev/null; then
-        pacman -Sy --noconfirm docker docker-compose openssl curl git >/dev/null
+        pacman -Sy --noconfirm docker openssl curl git >/dev/null
     elif command -v dnf &>/dev/null; then
-        dnf install -y -q docker docker-compose-plugin openssl curl git >/dev/null
+        dnf install -y -q docker openssl curl git >/dev/null
     elif command -v yum &>/dev/null; then
         yum install -y -q docker openssl curl git >/dev/null
     elif command -v zypper &>/dev/null; then
         zypper refresh -q
-        zypper install -y -q docker docker-compose openssl curl git >/dev/null
+        zypper install -y -q docker openssl curl git >/dev/null
     else
         log_error "Неподдерживаемый пакетный менеджер. Установите docker, git, curl, openssl вручную."
     fi
