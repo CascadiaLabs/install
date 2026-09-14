@@ -19,7 +19,9 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 # Проверка синтаксиса запуска
-if [[ ${1:-} != "@" || ${2:-} != "install" ]]; then
+# bash -c '...' @ install: @ находится в $0, install — в $1.
+# Прямой запуск bash node.sh @ install также поддерживается.
+if [[ ! ( "$0" == "@" && "${1:-}" == "install" ) && ! ( "${1:-}" == "@" && "${2:-}" == "install" ) ]]; then
     log_error "Usage: sudo bash -c \"\$(curl -sL https://github.com/CascadiaLabs/install/raw/main/node.sh)\" @ install"
 fi
 
@@ -79,46 +81,51 @@ else
     cd "$INSTALL_DIR"
 fi
 
+# Секреты доступны только root.
+umask 077
 # Сохранение или генерация API токена
 ENV_FILE="$INSTALL_DIR/.env"
 if [[ -f "$ENV_FILE" ]]; then
     log_info "Найден существующий .env, токен сохранен."
-    TOKEN=$(grep -E '^NODE_API_TOKEN=' "$ENV_FILE" | cut -d '=' -f2)
+    TOKEN=$(grep -E '^NODE_API_TOKEN=' "$ENV_FILE" | cut -d '=' -f2- || true)
+    [[ -n "$TOKEN" ]] || log_error "В $ENV_FILE отсутствует NODE_API_TOKEN; укажите непустой токен."
+    # Дописываем TLS-переменные, если их ещё нет (старые установки).
+    grep -q '^NODE_TLS_CERT=' "$ENV_FILE" || echo "NODE_TLS_CERT=/etc/node/certs/cert.pem" >> "$ENV_FILE"
+    grep -q '^NODE_TLS_KEY='  "$ENV_FILE" || echo "NODE_TLS_KEY=/etc/node/certs/key.pem"  >> "$ENV_FILE"
 else
     TOKEN=$(openssl rand -hex 32)
     cat > "$ENV_FILE" <<EOF
 NODE_API_TOKEN=$TOKEN
 NODE_API_LISTEN=0.0.0.0:6237
 NODE_CONFIG_PATH=/var/lib/node/config.json
+NODE_TLS_CERT=/etc/node/certs/cert.pem
+NODE_TLS_KEY=/etc/node/certs/key.pem
 EOF
     log_info "Сгенерирован новый API токен и создан .env"
 fi
 
-# # Базовый config.json
-# CONFIG_FILE="$INSTALL_DIR/config.json"
-# if [[ ! -f "$CONFIG_FILE" ]]; then
-#     cat > "$CONFIG_FILE" <<'EOF'
-# {
-#   "log": {
-#     "level": "info"
-#   },
-#   "inbounds": [],
-#   "outbounds": [],
-#   "route": {
-#     "rules": []
-#   }
-# }
-# EOF
-#     log_info "Создан базовый config.json"
-# fi
+chmod 600 "$ENV_FILE"
 
-# Генерация TLS-сертификатов
+# Сохраняем конфиг старой установки при переходе на единый data-volume.
+mkdir -p "$INSTALL_DIR/data"
+if [[ -f "$INSTALL_DIR/config.json" && ! -e "$INSTALL_DIR/data/config.json" ]]; then
+    cp "$INSTALL_DIR/config.json" "$INSTALL_DIR/data/config.json"
+fi
+
+# Генерация TLS-сертификатов (для gRPC API панели)
 CERT_DIR="$INSTALL_DIR/certs"
 mkdir -p "$CERT_DIR" "$INSTALL_DIR/data"
 if [[ ! -f "$CERT_DIR/cert.pem" || ! -f "$CERT_DIR/key.pem" ]]; then
     log_info "Генерация самоподписанного TLS-сертификата..."
+    # SAN: localhost + все IP интерфейсов машины, чтобы сертификат работал
+    # при подключении панели по любому адресу этой ноды.
+    SAN="DNS:localhost"
+    for ip in $(hostname -I 2>/dev/null || ip -4 addr show scope global 2>/dev/null | grep -oE 'inet [0-9.]+' | cut -d' ' -f2); do
+        SAN="$SAN,IP:$ip"
+    done
     openssl req -x509 -newkey rsa:2048 -keyout "$CERT_DIR/key.pem" -out "$CERT_DIR/cert.pem" \
-        -days 365 -nodes -subj "/CN=node/O=CascadiaLabs/C=RU" 2>/dev/null
+        -days 365 -nodes -subj "/CN=node/O=CascadiaLabs" \
+        -addext "subjectAltName=$SAN" 2>/dev/null
     chmod 600 "$CERT_DIR/key.pem"
 fi
 
@@ -128,6 +135,9 @@ docker build -t node .
 log_info "Запуск Docker-контейнера..."
 docker rm -f node 2>/dev/null || true
 
+# ВАЖНО: config.json не монтируется файлом — при его отсутствии Docker создал бы
+# каталог, и нода не смогла бы сохранять конфиг. Персистентность обеспечивает
+# volume на каталог /var/lib/node.
 docker run -d \
     --name node \
     --restart unless-stopped \
@@ -135,7 +145,6 @@ docker run -d \
     --env-file "$ENV_FILE" \
     -v "$INSTALL_DIR/.env:/etc/node/.env:ro" \
     -v "$INSTALL_DIR/certs:/etc/node/certs:ro" \
-    -v "$INSTALL_DIR/config.json:/var/lib/node/config.json" \
     -v "$INSTALL_DIR/data:/var/lib/node" \
     node
 
@@ -154,5 +163,8 @@ echo -e "${GREEN}API Token: ${TOKEN}${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
 echo "Используйте этот токен для подключения к панели."
-echo "Сертификат: $CERT_DIR/cert.pem"
-echo "Приватный ключ: $CERT_DIR/key.pem"
+echo "Адрес ноды для панели: <IP-этой-машины>:6237 (gRPC поверх TLS)."
+echo "Сертификат для поля Cert PEM в панели:"
+cat "$CERT_DIR/cert.pem"
+echo ""
+echo "Файл сертификата: $CERT_DIR/cert.pem"

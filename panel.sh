@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# panel.sh - Cascadia Panel installer script
+# Usage: sudo bash -c "$(curl -sL https://github.com/CascadiaLabs/install/raw/main/panel.sh)" @ install
+
+set -euo pipefail
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
+log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+
+# 1. Строгая проверка запуска от root
+if [[ $EUID -ne 0 ]]; then
+   log_error "Этот скрипт должен быть запущен от имени root (или через sudo)."
+fi
+
+# Проверка синтаксиса запуска
+# bash -c '...' @ install: @ находится в $0, install — в $1.
+# Прямой запуск bash panel.sh @ install также поддерживается.
+if [[ ! ( "$0" == "@" && "${1:-}" == "install" ) && ! ( "${1:-}" == "@" && "${2:-}" == "install" ) ]]; then
+    log_error "Usage: sudo bash -c \"\$(curl -sL https://github.com/CascadiaLabs/install/raw/main/panel.sh)\" @ install"
+fi
+
+# 2. Кроссдистрибутивная установка зависимостей
+install_dependencies() {
+    log_info "Определение дистрибутива и установка зависимостей..."
+
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq
+        apt-get install -y -qq docker.io docker-compose-plugin openssl curl git >/dev/null
+    elif command -v pacman &>/dev/null; then
+        pacman -Sy --noconfirm docker docker-compose openssl curl git >/dev/null
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q docker docker-compose-plugin openssl curl git >/dev/null
+    elif command -v yum &>/dev/null; then
+        yum install -y -q docker openssl curl git >/dev/null
+    elif command -v zypper &>/dev/null; then
+        zypper refresh -q
+        zypper install -y -q docker docker-compose openssl curl git >/dev/null
+    else
+        log_error "Неподдерживаемый пакетный менеджер. Установите docker, git, curl, openssl вручную."
+    fi
+
+    # Запуск и автозагрузка Docker службы
+    if command -v systemctl &>/dev/null; then
+        systemctl enable --now docker >/dev/null 2>&1 || true
+    fi
+}
+
+install_dependencies
+
+# 3. Установка в /opt/panel
+INSTALL_DIR="/opt/panel"
+
+# 4. Интерактивная проверка на переустановку (y/n)
+if [[ -d "$INSTALL_DIR" ]]; then
+    log_warn "Каталог $INSTALL_DIR уже существует."
+    read -rp "Установка уже выполнена. Желаете переустановить панель? [y/N]: " confirm
+    case "$confirm" in
+        [yY][eE][sS]|[yY])
+            log_info "Продолжение переустановки..."
+            ;;
+        *)
+            log_info "Установка отменена пользователем."
+            exit 0
+            ;;
+    esac
+fi
+
+mkdir -p "$INSTALL_DIR"
+
+log_info "Клонирование/обновление репозитория в $INSTALL_DIR..."
+if [[ -d "$INSTALL_DIR/.git" ]]; then
+    cd "$INSTALL_DIR" && git pull
+else
+    git clone https://github.com/CascadiaLabs/panel.git "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
+fi
+
+# Секреты доступны только root.
+umask 077
+# Сохранение или генерация API-токена (machine-to-machine, для скриптов).
+# Логин в веб-интерфейсе — по паролю (admin), задаётся PANEL_ADMIN_PASSWORD
+# или генерируется при первом старте (смотрите логи контейнера).
+ENV_FILE="$INSTALL_DIR/.env"
+if [[ -f "$ENV_FILE" ]]; then
+    log_info "Найден существующий .env, токен сохранен."
+    TOKEN=$(grep -E '^PANEL_TOKEN=' "$ENV_FILE" | cut -d '=' -f2- || true)
+    [[ -n "$TOKEN" ]] || log_error "В $ENV_FILE отсутствует PANEL_TOKEN; укажите непустой токен."
+else
+    TOKEN=$(openssl rand -hex 32)
+    if [[ -n "${PANEL_ADMIN_PASSWORD:-}" ]]; then
+        ADMIN_PASSWORD_LINE="PANEL_ADMIN_PASSWORD=${PANEL_ADMIN_PASSWORD}"
+    fi
+    cat > "$ENV_FILE" <<EOF
+PANEL_TOKEN=$TOKEN
+${ADMIN_PASSWORD_LINE:-}
+DB_PATH=/var/lib/panel/panel.db
+LISTEN_ADDR=0.0.0.0:2083
+EOF
+    log_info "Сгенерирован новый API-токен и создан .env"
+fi
+
+chmod 600 "$ENV_FILE"
+
+log_info "Сборка Docker-образа..."
+docker build -t panel .
+
+log_info "Запуск Docker-контейнера..."
+docker rm -f panel 2>/dev/null || true
+
+# ВАЖНО: БД хранится на volume-каталоге, а не файлом (Docker создал бы
+# каталог при отсутствии файла). При переустановке данные сохраняются.
+docker run -d \
+    --name panel \
+    --restart unless-stopped \
+    -p 2083:2083 \
+    --env-file "$ENV_FILE" \
+    -v "$INSTALL_DIR/data:/var/lib/panel" \
+    panel
+
+sleep 3
+
+if docker ps --filter "name=^/panel$" --filter "status=running" | grep -q panel; then
+    log_info "Контейнер успешно запущен!"
+else
+    log_error "Ошибка запуска контейнера. Проверьте логи: docker logs panel"
+fi
+
+echo ""
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN}Панель успешно запущена!${NC}"
+echo -e "${GREEN}URL: http://<IP-этой-машины>:2083${NC}"
+echo -e "${GREEN}Логин: admin${NC}"
+echo -e "${GREEN}Пароль: docker logs panel 2>&1 | grep -i 'FIRST LOGIN'${NC}"
+echo -e "${GREEN}API-токен (для скриптов): ${TOKEN}${NC}"
+echo -e "${GREEN}========================================${NC}"
+echo ""
+echo "Веб-интерфейс: войдите как admin и сразу смените пароль (Login → Смена пароля)."
+echo "PANEL_ADMIN_PASSWORD в .env задаёт пароль только при ПЕРВОМ старте (пустая БД)."
