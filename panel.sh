@@ -86,7 +86,7 @@ start_panel() {
         --env-file "$ENV_FILE" \
         -v "$INSTALL_DIR/data:/var/lib/panel" \
         ${PANEL_TLS_OPTS:-} \
-        panel
+        "$PANEL_IMAGE"
 
     sleep 3
 
@@ -99,6 +99,7 @@ start_panel() {
 
 # 3. Установка в /opt/panel
 INSTALL_DIR="/opt/panel"
+PANEL_IMAGE="${PANEL_IMAGE:-ghcr.io/cascadialabs/panel:latest}"
 
 # 4. Интерактивная проверка на переустановку (y/n)
 if [[ -d "$INSTALL_DIR" ]]; then
@@ -151,8 +152,13 @@ fi
 
 chmod 600 "$ENV_FILE"
 
-log_info "Сборка Docker-образа..."
-docker build -t panel .
+log_info "Загрузка Docker-образа $PANEL_IMAGE..."
+# Сборка на сервере (Go-тулчейн + модули) требует ~3GB. Предпочитаем готовый
+# образ из GHCR; локальная сборка — только fallback, пока образ не выложен.
+if ! docker pull "$PANEL_IMAGE"; then
+    log_warn "Образ $PANEL_IMAGE недоступен, собираю из исходников..."
+    docker build -t "$PANEL_IMAGE" .
+fi
 
 PANEL_TLS_OPTS=""
 start_panel
