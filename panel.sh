@@ -53,6 +53,50 @@ install_dependencies() {
 
 install_dependencies
 
+# Установка certbot (только когда пользователь выберет домен и SSL).
+install_certbot() {
+    if command -v certbot &>/dev/null; then
+        return
+    fi
+    log_info "Установка certbot (Let's Encrypt)..."
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y -qq certbot >/dev/null
+    elif command -v pacman &>/dev/null; then
+        pacman -Sy --noconfirm certbot >/dev/null
+    elif command -v dnf &>/dev/null; then
+        dnf install -y -q certbot >/dev/null
+    elif command -v yum &>/dev/null; then
+        yum install -y -q certbot >/dev/null
+    elif command -v zypper &>/dev/null; then
+        zypper refresh -q >/dev/null
+        zypper install -y -q certbot >/dev/null
+    else
+        log_error "Не удалось установить certbot. Установите его вручную: https://certbot.eff.org/instructions"
+    fi
+}
+
+# Запуск контейнера. PANEL_TLS_OPTS добавляет ssl-флаги и объем при
+# включённом домене.
+start_panel() {
+    docker rm -f panel 2>/dev/null || true
+    docker run -d \
+        --name panel \
+        --restart unless-stopped \
+        -p 2083:2083 \
+        --env-file "$ENV_FILE" \
+        -v "$INSTALL_DIR/data:/var/lib/panel" \
+        ${PANEL_TLS_OPTS:-} \
+        panel
+
+    sleep 3
+
+    if docker ps --filter "name=^/panel$" --filter "status=running" | grep -q panel; then
+        log_info "Контейнер panel запущен."
+    else
+        log_error "Ошибка запуска контейнера. Проверьте логи: docker logs panel"
+    fi
+}
+
 # 3. Установка в /opt/panel
 INSTALL_DIR="/opt/panel"
 
@@ -110,31 +154,78 @@ chmod 600 "$ENV_FILE"
 log_info "Сборка Docker-образа..."
 docker build -t panel .
 
-log_info "Запуск Docker-контейнера..."
-docker rm -f panel 2>/dev/null || true
+PANEL_TLS_OPTS=""
+start_panel
 
-# ВАЖНО: БД хранится на volume-каталоге, а не файлом (Docker создал бы
-# каталог при отсутствии файла). При переустановке данные сохраняются.
-docker run -d \
-    --name panel \
-    --restart unless-stopped \
-    -p 2083:2083 \
-    --env-file "$ENV_FILE" \
-    -v "$INSTALL_DIR/data:/var/lib/panel" \
-    panel
+echo ""
+log_info "Опционально: домен и SSL-сертификат (Let's Encrypt) для защищённого HTTPS-доступа к панели."
+log_info "Панель продолжит работать без домена — выберите N, чтобы пропустить."
+read -rp "Хотите настроить домен и SSL сейчас? [y/N]: " tls_confirm
+if [[ "$tls_confirm" =~ ^[yY]([eE][sS])?$ ]]; then
+    install_certbot
+    read -rp "Домен (A-запись уже должна указывать на IP этого сервера): " PANEL_DOMAIN
+    [[ -n "${PANEL_DOMAIN:-}" ]] || log_error "Домен не задан."
+    read -rp "E-mail для уведомлений Let's Encrypt (Enter — пропустить): " LE_EMAIL
 
-sleep 3
+    log_info "Выпуск сертификата для $PANEL_DOMAIN (certbot временно займёт порт 80)..."
+    certbot_args=(certonly --standalone --non-interactive --agree-tos -d "$PANEL_DOMAIN")
+    if [[ -n "${LE_EMAIL:-}" ]]; then
+        certbot_args+=(--email "$LE_EMAIL")
+    else
+        certbot_args+=(--register-unsafely-without-email)
+    fi
+    certbot "${certbot_args[@]}"
 
-if docker ps --filter "name=^/panel$" --filter "status=running" | grep -q panel; then
-    log_info "Контейнер успешно запущен!"
+    cat >> "$ENV_FILE" <<EOF
+PANEL_TLS_CERT=/etc/letsencrypt/live/$PANEL_DOMAIN/fullchain.pem
+PANEL_TLS_KEY=/etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem
+EOF
+    chmod 600 "$ENV_FILE"
+    PANEL_TLS_OPTS="-v /etc/letsencrypt:/etc/letsencrypt:ro"
+    start_panel
+
+    # Авто-продление: сертификаты живут ~90 дней. Под systemd — таймер,
+    # иначе crontab. После продления контейнер перезапускается, чтобы панель
+    # перечитала новый сертификат.
+    log_info "Настройка авто-продления сертификата..."
+    if command -v systemctl &>/dev/null; then
+        cat > /etc/systemd/system/cascadia-panel-renew.service <<EOF
+[Unit]
+Description=Renew Cascadia panel Let's Encrypt certificate
+After=network-online.target
+[Service]
+Type=oneshot
+ExecStart=certbot renew -q --deploy-hook "docker restart panel"
+EOF
+        cat > /etc/systemd/system/cascadia-panel-renew.timer <<EOF
+[Unit]
+Description=Twice-daily certbot renewal for the Cascadia panel
+[Timer]
+OnCalendar=*-*-* 02:00:00
+RandomizedDelaySec=3600
+Persistent=true
+[Install]
+WantedBy=timers.target
+EOF
+        systemctl daemon-reload >/dev/null
+        systemctl enable --now cascadia-panel-renew.timer >/dev/null 2>&1 || true
+    else
+        ( crontab -l 2>/dev/null | grep -v 'cascadia-panel-renew'; \
+          echo '0 3 * * * certbot renew -q --deploy-hook "docker restart panel"' ) | crontab -
+    fi
+    PANEL_TLS="on"
 else
-    log_error "Ошибка запуска контейнера. Проверьте логи: docker logs panel"
+    PANEL_TLS="off"
 fi
 
 echo ""
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Панель успешно запущена!${NC}"
-echo -e "${GREEN}URL: http://<IP-этой-машины>:2083${NC}"
+if [[ "$PANEL_TLS" == "on" ]]; then
+    echo -e "${GREEN}URL: https://${PANEL_DOMAIN}:2083${NC}"
+else
+    echo -e "${GREEN}URL: http://<IP-этой-машины>:2083${NC}"
+fi
 echo -e "${GREEN}Логин: admin${NC}"
 echo -e "${GREEN}Пароль: docker logs panel 2>&1 | grep -i 'FIRST LOGIN'${NC}"
 echo -e "${GREEN}API-токен (для скриптов): ${TOKEN}${NC}"
