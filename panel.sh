@@ -121,7 +121,7 @@ log_info "Клонирование/обновление репозитория �
 if [[ -d "$INSTALL_DIR/.git" ]]; then
     cd "$INSTALL_DIR" && git pull
 else
-    git clone https://github.com/CascadiaLabs/panel.git "$INSTALL_DIR"
+    git clone --depth 1 https://github.com/CascadiaLabs/panel.git "$INSTALL_DIR"
     cd "$INSTALL_DIR"
 fi
 
