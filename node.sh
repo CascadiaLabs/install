@@ -55,6 +55,7 @@ install_dependencies
 
 # 3. Установка в /opt/node
 INSTALL_DIR="/opt/node"
+NODE_IMAGE="${NODE_IMAGE:-ghcr.io/cascadialabs/node:latest}"
 
 # 4. Интерактивная проверка на переустановку (y/n)
 if [[ -d "$INSTALL_DIR" ]]; then
@@ -129,8 +130,14 @@ if [[ ! -f "$CERT_DIR/cert.pem" || ! -f "$CERT_DIR/key.pem" ]]; then
     chmod 600 "$CERT_DIR/key.pem"
 fi
 
-log_info "Сборка Docker-образа..."
-docker build -t node .
+log_info "Загрузка Docker-образа $NODE_IMAGE..."
+# Сборка на сервере (Go-тулчейн + модули sing-box) требует гигабайты.
+# Предпочитаем готовый образ из GHCR; локальная сборка — только fallback,
+# пока образ не выложен.
+if ! docker pull "$NODE_IMAGE"; then
+    log_warn "Образ $NODE_IMAGE недоступен, собираю из исходников..."
+    docker build -t "$NODE_IMAGE" .
+fi
 
 log_info "Запуск Docker-контейнера..."
 docker rm -f node 2>/dev/null || true
@@ -146,7 +153,7 @@ docker run -d \
     -v "$INSTALL_DIR/.env:/etc/node/.env:ro" \
     -v "$INSTALL_DIR/certs:/etc/node/certs:ro" \
     -v "$INSTALL_DIR/data:/var/lib/node" \
-    node
+    "$NODE_IMAGE"
 
 sleep 3
 
