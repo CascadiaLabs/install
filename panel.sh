@@ -31,18 +31,18 @@ install_dependencies() {
 
     if command -v apt-get &>/dev/null; then
         apt-get update -qq
-        apt-get install -y -qq docker.io openssl curl git >/dev/null
+        apt-get install -y -qq docker.io openssl curl >/dev/null
     elif command -v pacman &>/dev/null; then
-        pacman -Sy --noconfirm docker openssl curl git >/dev/null
+        pacman -Sy --noconfirm docker openssl curl >/dev/null
     elif command -v dnf &>/dev/null; then
-        dnf install -y -q docker openssl curl git >/dev/null
+        dnf install -y -q docker openssl curl >/dev/null
     elif command -v yum &>/dev/null; then
-        yum install -y -q docker openssl curl git >/dev/null
+        yum install -y -q docker openssl curl >/dev/null
     elif command -v zypper &>/dev/null; then
         zypper refresh -q
-        zypper install -y -q docker openssl curl git >/dev/null
+        zypper install -y -q docker openssl curl >/dev/null
     else
-        log_error "Неподдерживаемый пакетный менеджер. Установите docker, git, curl, openssl вручную."
+        log_error "Неподдерживаемый пакетный менеджер. Установите docker, curl, openssl вручную."
     fi
 
     # Запуск и автозагрузка Docker службы
@@ -118,14 +118,6 @@ fi
 
 mkdir -p "$INSTALL_DIR"
 
-log_info "Клонирование/обновление репозитория в $INSTALL_DIR..."
-if [[ -d "$INSTALL_DIR/.git" ]]; then
-    cd "$INSTALL_DIR" && git pull
-else
-    git clone --depth 1 https://github.com/CascadiaLabs/panel.git "$INSTALL_DIR"
-    cd "$INSTALL_DIR"
-fi
-
 # Секреты доступны только root.
 umask 077
 # Сохранение или генерация API-токена (machine-to-machine, для скриптов).
@@ -153,12 +145,7 @@ fi
 chmod 600 "$ENV_FILE"
 
 log_info "Загрузка Docker-образа $PANEL_IMAGE..."
-# Сборка на сервере (Go-тулчейн + модули) требует ~3GB. Предпочитаем готовый
-# образ из GHCR; локальная сборка — только fallback, пока образ не выложен.
-if ! docker pull "$PANEL_IMAGE"; then
-    log_warn "Образ $PANEL_IMAGE недоступен, собираю из исходников..."
-    docker build -t "$PANEL_IMAGE" .
-fi
+docker pull "$PANEL_IMAGE"
 
 PANEL_TLS_OPTS=""
 start_panel

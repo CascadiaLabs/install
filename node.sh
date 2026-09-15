@@ -31,18 +31,18 @@ install_dependencies() {
     
     if command -v apt-get &>/dev/null; then
         apt-get update -qq
-        apt-get install -y -qq docker.io openssl curl git >/dev/null
+        apt-get install -y -qq docker.io openssl curl >/dev/null
     elif command -v pacman &>/dev/null; then
-        pacman -Sy --noconfirm docker openssl curl git >/dev/null
+        pacman -Sy --noconfirm docker openssl curl >/dev/null
     elif command -v dnf &>/dev/null; then
-        dnf install -y -q docker openssl curl git >/dev/null
+        dnf install -y -q docker openssl curl >/dev/null
     elif command -v yum &>/dev/null; then
-        yum install -y -q docker openssl curl git >/dev/null
+        yum install -y -q docker openssl curl >/dev/null
     elif command -v zypper &>/dev/null; then
         zypper refresh -q
-        zypper install -y -q docker openssl curl git >/dev/null
+        zypper install -y -q docker openssl curl >/dev/null
     else
-        log_error "Неподдерживаемый пакетный менеджер. Установите docker, git, curl, openssl вручную."
+        log_error "Неподдерживаемый пакетный менеджер. Установите docker, curl, openssl вручную."
     fi
 
     # Запуск и автозагрузка Docker службы
@@ -73,14 +73,6 @@ if [[ -d "$INSTALL_DIR" ]]; then
 fi
 
 mkdir -p "$INSTALL_DIR"
-
-log_info "Клонирование/обновление репозитория в $INSTALL_DIR..."
-if [[ -d "$INSTALL_DIR/.git" ]]; then
-    cd "$INSTALL_DIR" && git pull
-else
-    git clone --depth 1 https://github.com/CascadiaLabs/node.git "$INSTALL_DIR"
-    cd "$INSTALL_DIR"
-fi
 
 # Секреты доступны только root.
 umask 077
@@ -131,13 +123,7 @@ if [[ ! -f "$CERT_DIR/cert.pem" || ! -f "$CERT_DIR/key.pem" ]]; then
 fi
 
 log_info "Загрузка Docker-образа $NODE_IMAGE..."
-# Сборка на сервере (Go-тулчейн + модули sing-box) требует гигабайты.
-# Предпочитаем готовый образ из GHCR; локальная сборка — только fallback,
-# пока образ не выложен.
-if ! docker pull "$NODE_IMAGE"; then
-    log_warn "Образ $NODE_IMAGE недоступен, собираю из исходников..."
-    docker build -t "$NODE_IMAGE" .
-fi
+docker pull "$NODE_IMAGE"
 
 log_info "Запуск Docker-контейнера..."
 docker rm -f node 2>/dev/null || true
