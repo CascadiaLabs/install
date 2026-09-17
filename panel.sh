@@ -29,18 +29,36 @@ fi
 install_dependencies() {
     log_info "Определение дистрибутива и установка зависимостей..."
 
+    # Уже установленные зависимости не трогаем: повторная установка docker.io
+    # на сервере с docker-ce/podman роняет apt (pkgProblemResolver: generated breaks).
+    local missing=()
+    for c in docker curl openssl; do
+        command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+    done
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        log_info "docker, curl, openssl уже установлены — пропускаем установку."
+        return
+    fi
+    log_info "Устанавливаю недостающее: ${missing[*]}"
+
     if command -v apt-get &>/dev/null; then
+        local apkgs=()
+        for c in "${missing[@]}"; do
+            [[ $c == docker ]] && c=docker.io
+            apkgs+=("$c")
+        done
         apt-get update -qq
-        apt-get install -y -qq docker.io openssl curl >/dev/null
+        apt-get install -y -qq "${apkgs[@]}" >/dev/null \
+            || log_error "apt не может установить ${apkgs[*]}. Проверьте: apt-get -f install, apt-mark showhold."
     elif command -v pacman &>/dev/null; then
-        pacman -Sy --noconfirm docker openssl curl >/dev/null
+        pacman -Sy --noconfirm "${missing[@]}" >/dev/null
     elif command -v dnf &>/dev/null; then
-        dnf install -y -q docker openssl curl >/dev/null
+        dnf install -y -q "${missing[@]}" >/dev/null
     elif command -v yum &>/dev/null; then
-        yum install -y -q docker openssl curl >/dev/null
+        yum install -y -q "${missing[@]}" >/dev/null
     elif command -v zypper &>/dev/null; then
         zypper refresh -q
-        zypper install -y -q docker openssl curl >/dev/null
+        zypper install -y -q "${missing[@]}" >/dev/null
     else
         log_error "Неподдерживаемый пакетный менеджер. Установите docker, curl, openssl вручную."
     fi
