@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# casc - Cascadia CLI: управление панелью и нодой (Docker).
+# Устанавливается install-скриптами в /usr/local/bin/casc.
+
+set -euo pipefail
+
+CASC_VERSION="1.0.0"
+PANEL_DIR="/opt/panel"
+NODE_DIR="/opt/node"
+PANEL_IMAGE="ghcr.io/cascadialabs/panel:latest"
+NODE_IMAGE="ghcr.io/cascadialabs/node:latest"
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+log()  { echo -e "${GREEN}[casc]${NC} $1"; }
+warn() { echo -e "${YELLOW}[casc]${NC} $1"; }
+err()  { echo -e "${RED}[casc]${NC} $1"; exit 1; }
+
+[[ $EUID -eq 0 ]] || err "Запустите через sudo (нужно читать секреты в $PANEL_DIR/$NODE_DIR)."
+
+# Имя контейнера: для panel имя совпадает с каталогом, для node — тоже.
+# env_value <файл> <KEY>: значение из .env
+env_value() { grep -E "^$2=" "$1" 2>/dev/null | head -1 | cut -d= -f2- || true; }
+
+container_active() { [[ -n "$(docker ps -q --filter "name=^/$1$" --filter "status=running")" ]]; }
+
+PORT_OPTS="-p 2083:2083"
+NODE_VOLUMES="-v $NODE_DIR/.env:/etc/node/.env:ro -v $NODE_DIR/certs:/etc/node/certs:ro -v $NODE_DIR/data:/var/lib/node"
+
+# Пересоздание контейнера со свежим образом (--pull always тянет latest из registry).
+run_container() {
+    local name="$1" image="$2"; shift 2
+    docker rm -f "$name" 2>/dev/null || true
+    docker run -d --pull always --name "$name" --restart unless-stopped "$@" "$image"
+}
+
+run_panel() {
+    local tls_mount=""
+    [[ -n "$(env_value "$PANEL_DIR/.env" PANEL_TLS_CERT)" ]] && tls_mount="-v /etc/letsencrypt:/etc/letsencrypt:ro"
+    run_container panel "$PANEL_IMAGE" $PORT_OPTS --env-file "$PANEL_DIR/.env" \
+        -v "$PANEL_DIR/data:/var/lib/panel" $tls_mount
+}
+
+run_node() {
+    run_container node "$NODE_IMAGE" --network host --env-file "$NODE_DIR/.env" $NODE_VOLUMES
+}
+
+cmd_status() {
+    docker ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}' \
+        --filter "name=^/panel$" --filter "name=^/node$" || true
+    echo ""
+    if [[ -f "$PANEL_DIR/.env" ]]; then
+        log "Panel token: $(env_value "$PANEL_DIR/.env" PANEL_TOKEN | cut -c1-8)..."
+    else
+        warn "Панель не установлена ($PANEL_DIR)."
+    fi
+    if [[ -f "$NODE_DIR/.env" ]]; then
+        log "Node  token: $(env_value "$NODE_DIR/.env" NODE_API_TOKEN | cut -c1-8)..."
+    else
+        warn "Нода не установлена ($NODE_DIR)."
+    fi
+}
+
+# docker start/stop/restart с учётом TARGETS (panel|node|both).
+do_lifecycle() {
+    local op="$1" targets=()
+    [[ "$TARGETS" != "node" ]] && targets+=(panel)
+    [[ "$TARGETS" != "panel" ]] && targets+=(node)
+    docker "$op" "${targets[@]}"
+    log "${op}: ${targets[*]}"
+}
+
+cmd_logs() {
+    local target="${1:-$TARGETS}"
+    case "$target" in
+        panel) docker logs -f panel ;;
+        node)  docker logs -f node ;;
+        both)  docker logs -f panel & docker logs -f node; wait ;;
+        *) err "logs: неизвестная цель '$target' (panel|node)." ;;
+    esac
+}
+
+cmd_update() {
+    if [[ "$TARGETS" != "node" ]]; then log "Обновление panel..."; run_panel; fi
+    if [[ "$TARGETS" != "panel" ]]; then log "Обновление node..."; run_node; fi
+    log "Готово."
+}
+
+cmd_uninstall() {
+    local purge=false
+    [[ "${1:-}" == "--purge" ]] && purge=true
+    read -rp "Удалить контейнеры panel и node? [y/N]: " confirm
+    [[ "$confirm" =~ ^[yY]([eE][sS])?$ ]] || { log "Отменено."; exit 0; }
+    docker rm -f panel node 2>/dev/null || true
+    log "Контейнеры удалены."
+    if $purge; then
+        rm -rf "$PANEL_DIR" "$NODE_DIR"
+        log "Каталоги $PANEL_DIR и $NODE_DIR удалены."
+        rm -f /etc/systemd/system/cascadia-panel-renew.{service,timer}
+        systemctl daemon-reload 2>/dev/null || true
+        command -v crontab &>/dev/null && crontab -l 2>/dev/null | grep -v cascadia-panel-renew | crontab - || true
+        log "systemd-таймер/cron продления сертификата удалены."
+    fi
+}
+
+cmd_password() {
+    local pw env_pw
+    env_pw="$(env_value "$PANEL_DIR/.env" PANEL_ADMIN_PASSWORD)"
+    if [[ -n "$env_pw" ]]; then
+        echo "Пароль admin (из PANEL_ADMIN_PASSWORD): $env_pw"
+        return
+    fi
+    if container_active panel; then
+        pw="$(docker logs panel 2>&1 | sed -n 's/.*password=\([^ )]*\).*/\1/p' | tail -1)"
+        [[ -n "$pw" ]] && { echo "Пароль admin (первый запуск, смените после логина): $pw"; return; }
+    fi
+    warn "Пароль нельзя восстановить (bcrypt). Сделайте: sudo casc password reset"
+}
+
+cmd_password_reset() {
+    local pw="${1:-$(openssl rand -hex 16)}"
+    container_active panel || { warn "Контейнер panel не запущен — запускаю..."; docker start panel >/dev/null; sleep 2; }
+    container_active panel || err "Контейнер panel не стартовал. Проверьте: docker logs panel"
+    echo "Новый пароль admin: $(docker exec panel panel reset-password "$pw")"
+    log "Сессии admin сброшены."
+}
+
+cmd_token() {
+    local token
+    token="$(env_value "$NODE_DIR/.env" NODE_API_TOKEN)"
+    [[ -n "$token" ]] || err "Нода не установлена или нет NODE_API_TOKEN в $NODE_DIR/.env"
+    echo "Node API-token: $token"
+}
+
+cmd_cert() {
+    local target="${1:-$TARGETS}" cert
+    case "$target" in
+        panel)
+            cert="$(env_value "$PANEL_DIR/.env" PANEL_TLS_CERT)"
+            [[ -n "$cert" ]] || err "PANEL_TLS_CERT не задан — TLS панели не настроен."
+            [[ -f "$cert" ]] || err "Файл сертификата не найден: $cert"
+            cat "$cert"
+            warn "Приватный ключ: ${cert%/fullchain.pem}/privkey.pem (только root)."
+            ;;
+        node)
+            [[ -f "$NODE_DIR/certs/cert.pem" ]] || err "Нода не установлена или нет сертификата: $NODE_DIR/certs/cert.pem"
+            cat "$NODE_DIR/certs/cert.pem"
+            warn "Приватный ключ: $NODE_DIR/certs/key.pem (только root)."
+            ;;
+        both)
+            cert="$(env_value "$PANEL_DIR/.env" PANEL_TLS_CERT)"
+            if [[ -n "$cert" && -f "$cert" ]]; then
+                echo "== Panel cert ($cert) =="; cat "$cert"
+                warn "Приватный ключ: ${cert%/fullchain.pem}/privkey.pem (только root)."
+            else
+                warn "TLS панели не настроен (PANEL_TLS_CERT)."
+            fi
+            echo ""
+            if [[ -f "$NODE_DIR/certs/cert.pem" ]]; then
+                echo "== Node cert =="; cat "$NODE_DIR/certs/cert.pem"
+                warn "Приватный ключ: $NODE_DIR/certs/key.pem (только root)."
+            else
+                warn "Нода не установлена или нет сертификата: $NODE_DIR/certs/cert.pem"
+            fi
+            ;;
+        *) err "cert: неизвестная цель '$target' (panel|node)." ;;
+    esac
+}
+
+usage() {
+    cat <<EOF
+casc $CASC_VERSION - управление Cascadia panel/node
+
+Использование: sudo casc [panel|node] <команда> [аргументы]
+
+После [panel|node] команда применяется только к этому компоненту.
+
+Команды:
+  status                     статус контейнеров и токены
+  reload                     перезапуск контейнеров
+  update                     pull свежих образов и пересоздание
+  logs [panel|node]          логи (docker logs -f)
+  up | down                  запуск/остановка контейнеров
+  uninstall [--purge]        удаление контейнеров (+ каталоги/таймер с --purge)
+  password                   показать пароль admin (если доступен)
+  password reset [ПАРОЛЬ]    сбросить пароль admin (сессии сбрасываются)
+  token                      показать API-token ноды
+  cert [panel|node]          показать TLS-сертификат (node: cert.pem; panel: fullchain.pem)
+  version | help
+EOF
+}
+
+TARGETS="both"
+case "${1:-}" in
+    panel) TARGETS="panel"; shift ;;
+    node)  TARGETS="node";  shift ;;
+esac
+
+case "${1:-}" in
+    status)    cmd_status ;;
+    reload)    do_lifecycle restart ;;
+    up)        do_lifecycle start ;;
+    down)      do_lifecycle stop ;;
+    logs)      cmd_logs "${2:-}" ;;
+    update)    cmd_update ;;
+    uninstall) cmd_uninstall "${2:-}" ;;
+    password)  if [[ "${2:-}" == "reset" ]]; then cmd_password_reset "${3:-}"; else cmd_password; fi ;;
+    token)     cmd_token ;;
+    cert)      cmd_cert "${2:-}" ;;
+    version)   echo "casc $CASC_VERSION" ;;
+    help|-h|"") usage ;;
+    *) err "Неизвестная команда '${1:-}'. Смотри: sudo casc help" ;;
+esac

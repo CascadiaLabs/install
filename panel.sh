@@ -53,6 +53,18 @@ install_dependencies() {
 
 install_dependencies
 
+# CLI-утилита casc (управление панелью/нодой после установки).
+install_casc() {
+    log_info "Установка утилиты casc в /usr/local/bin/casc..."
+    if curl -fsSL "https://raw.githubusercontent.com/CascadiaLabs/install/main/casc" -o /usr/local/bin/casc; then
+        chmod +x /usr/local/bin/casc
+        log_info "casc установлена: sudo casc status / sudo casc password reset"
+    else
+        log_warn "Не удалось загрузить casc. Установите вручную: sudo curl -fsSL https://raw.githubusercontent.com/CascadiaLabs/install/main/casc -o /usr/local/bin/casc && sudo chmod +x /usr/local/bin/casc"
+    fi
+}
+install_casc
+
 # Установка certbot (только когда пользователь выберет домен и SSL).
 install_certbot() {
     if command -v certbot &>/dev/null; then
