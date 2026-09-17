@@ -178,8 +178,10 @@ chmod 600 "$ENV_FILE"
 log_info "Загрузка Docker-образа $PANEL_IMAGE..."
 docker pull "$PANEL_IMAGE"
 
+# Панель запускается только после выбора TLS. Иначе первый старт создаёт admin
+# и печатает одноразовый пароль, а перезапуск после настройки SSL очищает
+# доступный через `docker logs` вывод контейнера.
 PANEL_TLS_OPTS=""
-start_panel
 
 echo ""
 log_info "Опционально: домен и SSL-сертификат (Let's Encrypt) для защищённого HTTPS-доступа к панели."
@@ -206,7 +208,6 @@ PANEL_TLS_KEY=/etc/letsencrypt/live/$PANEL_DOMAIN/privkey.pem
 EOF
     chmod 600 "$ENV_FILE"
     PANEL_TLS_OPTS="-v /etc/letsencrypt:/etc/letsencrypt:ro"
-    start_panel
 
     # Авто-продление: сертификаты живут ~90 дней. Под systemd — таймер,
     # иначе crontab. После продления контейнер перезапускается, чтобы панель
@@ -241,6 +242,10 @@ EOF
 else
     PANEL_TLS="off"
 fi
+
+# Единственный первый запуск: при пустой БД здесь будет создан admin и его
+# пароль останется в логах, независимо от того, был ли выбран SSL.
+start_panel
 
 echo ""
 echo -e "${GREEN}========================================${NC}"

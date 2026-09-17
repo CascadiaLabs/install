@@ -121,10 +121,15 @@ cmd_password() {
 }
 
 cmd_password_reset() {
-    local pw="${1:-$(openssl rand -hex 16)}"
+    local pw="${1:-$(openssl rand -hex 16)}" reset_output
     container_active panel || { warn "Контейнер panel не запущен — запускаю..."; docker start panel >/dev/null; sleep 2; }
     container_active panel || err "Контейнер panel не стартовал. Проверьте: docker logs panel"
-    echo "Новый пароль admin: $(docker exec panel panel reset-password "$pw")"
+    # Бинарник образа расположен в /app и не добавлен в PATH. Аргумент
+    # "panel" сохраняет формат CLI, который ожидает сам бинарник.
+    if ! reset_output="$(docker exec panel /app/panel panel reset-password "$pw")"; then
+        err "Не удалось сбросить пароль admin. Проверьте: docker logs panel"
+    fi
+    echo "Новый пароль admin: $reset_output"
     log "Сессии admin сброшены."
 }
 
