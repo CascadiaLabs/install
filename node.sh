@@ -132,6 +132,7 @@ docker rm -f node 2>/dev/null || true
 # каталог, и нода не смогла бы сохранять конфиг. Персистентность обеспечивает
 # volume на каталог /var/lib/node.
 docker run -d \
+    --pull always \
     --name node \
     --restart unless-stopped \
     --network host \

@@ -80,6 +80,7 @@ install_certbot() {
 start_panel() {
     docker rm -f panel 2>/dev/null || true
     docker run -d \
+        --pull always \
         --name panel \
         --restart unless-stopped \
         -p 2083:2083 \
