@@ -8,6 +8,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
+NODE_CONTAINER="cascadia-node"
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -156,14 +157,21 @@ log_info "Загрузка Docker-образа $NODE_IMAGE..."
 docker pull "$NODE_IMAGE"
 
 log_info "Запуск Docker-контейнера..."
-docker rm -f node 2>/dev/null || true
+# Переезд со старого имени безопасен только для образа Cascadia: чужой
+# контейнер с общим именем node не трогаем.
+legacy_image="$(docker inspect --format '{{.Config.Image}}' node 2>/dev/null || true)"
+if [[ "$legacy_image" == ghcr.io/cascadialabs/node:* ]]; then
+    log_info "Перенос контейнера node в $NODE_CONTAINER..."
+    docker rm -f node >/dev/null
+fi
+docker rm -f "$NODE_CONTAINER" 2>/dev/null || true
 
 # ВАЖНО: config.json не монтируется файлом — при его отсутствии Docker создал бы
 # каталог, и нода не смогла бы сохранять конфиг. Персистентность обеспечивает
 # volume на каталог /var/lib/node.
 docker run -d \
     --pull always \
-    --name node \
+    --name "$NODE_CONTAINER" \
     --restart unless-stopped \
     --network host \
     --env-file "$ENV_FILE" \
@@ -174,10 +182,10 @@ docker run -d \
 
 sleep 3
 
-if docker ps --filter "name=^/node$" --filter "status=running" | grep -q node; then
+if docker ps --filter "name=^/$NODE_CONTAINER$" --filter "status=running" | grep -q "$NODE_CONTAINER"; then
     log_info "Контейнер успешно запущен!"
 else
-    log_error "Ошибка запуска контейнера. Проверьте логи: docker logs node"
+    log_error "Ошибка запуска контейнера. Проверьте логи: docker logs $NODE_CONTAINER"
 fi
 
 echo ""

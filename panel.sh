@@ -8,6 +8,7 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
+PANEL_CONTAINER="cascadia-panel"
 
 log_info()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC} $1"; }
@@ -108,10 +109,18 @@ install_certbot() {
 # Запуск контейнера. PANEL_TLS_OPTS добавляет ssl-флаги и объем при
 # включённом домене.
 start_panel() {
-    docker rm -f panel 2>/dev/null || true
+	# Переезд со старого имени безопасен только для образа Cascadia: чужой
+	# контейнер с общим именем panel не трогаем.
+	local legacy_image
+	legacy_image="$(docker inspect --format '{{.Config.Image}}' panel 2>/dev/null || true)"
+	if [[ "$legacy_image" == ghcr.io/cascadialabs/panel:* ]]; then
+		log_info "Перенос контейнера panel в $PANEL_CONTAINER..."
+		docker rm -f panel >/dev/null
+	fi
+    docker rm -f "$PANEL_CONTAINER" 2>/dev/null || true
     docker run -d \
         --pull always \
-        --name panel \
+        --name "$PANEL_CONTAINER" \
         --restart unless-stopped \
         -p 2083:2083 \
         --env-file "$ENV_FILE" \
@@ -121,10 +130,10 @@ start_panel() {
 
     sleep 3
 
-    if docker ps --filter "name=^/panel$" --filter "status=running" | grep -q panel; then
-        log_info "Контейнер panel запущен."
+    if docker ps --filter "name=^/$PANEL_CONTAINER$" --filter "status=running" | grep -q "$PANEL_CONTAINER"; then
+        log_info "Контейнер $PANEL_CONTAINER запущен."
     else
-        log_error "Ошибка запуска контейнера. Проверьте логи: docker logs panel"
+        log_error "Ошибка запуска контейнера. Проверьте логи: docker logs $PANEL_CONTAINER"
     fi
 }
 
@@ -220,7 +229,7 @@ Description=Renew Cascadia panel Let's Encrypt certificate
 After=network-online.target
 [Service]
 Type=oneshot
-ExecStart=certbot renew -q --deploy-hook "docker restart panel"
+ExecStart=certbot renew -q --deploy-hook "docker restart $PANEL_CONTAINER"
 EOF
         cat > /etc/systemd/system/cascadia-panel-renew.timer <<EOF
 [Unit]
@@ -236,7 +245,7 @@ EOF
         systemctl enable --now cascadia-panel-renew.timer >/dev/null 2>&1 || true
     else
         ( crontab -l 2>/dev/null | grep -v 'cascadia-panel-renew'; \
-          echo '0 3 * * * certbot renew -q --deploy-hook "docker restart panel"' ) | crontab -
+          echo "0 3 * * * certbot renew -q --deploy-hook \"docker restart $PANEL_CONTAINER\"" ) | crontab -
     fi
     PANEL_TLS="on"
 else
@@ -256,7 +265,7 @@ else
     echo -e "${GREEN}URL: http://<IP-этой-машины>:2083${NC}"
 fi
 echo -e "${GREEN}Логин: admin${NC}"
-echo -e "${GREEN}Пароль: docker logs panel 2>&1 | grep -i 'FIRST LOGIN'${NC}"
+echo -e "${GREEN}Пароль: docker logs $PANEL_CONTAINER 2>&1 | grep -i 'FIRST LOGIN'${NC}"
 echo -e "${GREEN}API-токен (для скриптов): ${TOKEN}${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo ""
